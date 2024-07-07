@@ -1,0 +1,113 @@
+name: ci-cd
+
+on: [push, pull_request]
+
+jobs:
+  ci:
+    # Set up operating system
+    runs-on: ubuntu-latest
+
+    # Define job steps
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Check-out repository
+        uses: actions/checkout@v3
+
+      - name: Install poetry
+        uses: snok/install-poetry@v1
+
+      - name: Install package
+        run: poetry install
+
+      - name: Test with pytest
+        run: poetry run pytest tests/ --cov=scimpl --cov-report=xml --verbose
+
+      - name: Use Codecov to track coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml   # coverage report
+
+      - name: Build documentation
+        run: poetry run make html --directory docs/
+
+  cd:
+    permissions:
+      id-tokens: write
+      contents: write
+    # Only run this job if the "ci" job passes
+    needs: ci
+
+    # Only run this job if new work is pushed to "main"
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    # Set up operating system
+    runs-on: ubuntu-latest
+
+    # Define job steps
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Check-out repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Install poetry
+        uses: snok/install-poetry@v1
+
+      - name: Install package
+        run: poetry install
+
+      - name: Use Python Semantic Release to prepare release
+        env:
+          # This token is created automatically by GH Actions
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        id: release
+        run: |
+            git config user.name github-actions
+            git config user.email github-actions@github.com
+            poetry run semantic-release -v version
+            # Store if
+            if [ -d dist ]; then
+              echo "RELEASE=true" >> "$GITHUB_ENV"
+            fi
+
+      - name: Publish to TestPyPI
+        if: env.RELEASE == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          repository_url: https://test.pypi.org/legacy/
+
+      - name: Test install from TestPyPI
+        if: env.RELEASE == 'true'
+        run: |
+            pip install \
+            --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple \
+            scimpl
+
+      - name: Publish to PyPI
+        if: env.RELEASE == 'true'
+        id: pypub
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          verose: true
+
+      - name: Sync Tags with Upload
+        if: env.RELEASE == 'true' && steps.pypub.conclusion == 'failure' && steps.pypub.conclusion
+        run: |
+          git pull origin main
+          echo "LAST_TAG=$(git describe --tags --abbrev=0)" >> "$GITHUB_ENV"
+          echo "Rerolling Github release $LAST_TAG"
+          git push --delete env.LAST_TAG
